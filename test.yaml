@@ -2,3 +2,4 @@ name: xyz
 age: 11
 address: no man's land
 active: true
+variable: {{ vars.choice }}
