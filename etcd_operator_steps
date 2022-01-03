@@ -1,0 +1,196 @@
+cd /root && \
+oc new-project myproject
+
+cat > etcd-operator-crd.yaml<<EOF
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: etcdclusters.etcd.database.coreos.com
+spec:
+  group: etcd.database.coreos.com
+  names:
+    kind: EtcdCluster
+    listKind: EtcdClusterList
+    plural: etcdclusters
+    shortNames:
+    - etcdclus
+    - etcd
+    singular: etcdcluster
+  scope: Namespaced
+  version: v1beta2
+  versions:
+  - name: v1beta2
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
+    served: true
+    storage: true
+EOF
+
+oc create -f etcd-operator-crd.yaml
+
+oc get crd etcdclusters.etcd.database.coreos.com
+
+
+Step 2:
+cat > etcd-operator-sa.yaml<<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-operator-sa
+EOF
+
+oc create -f etcd-operator-sa.yaml
+oc get sa
+
+cat > etcd-operator-role.yaml<<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: etcd-operator-role
+rules:
+- apiGroups:
+  - etcd.database.coreos.com
+  resources:
+  - etcdclusters
+  - etcdbackups
+  - etcdrestores
+  verbs:
+  - '*'
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - services
+  - endpoints
+  - persistentvolumeclaims
+  - events
+  verbs:
+  - '*'
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - '*'
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+EOF
+
+oc create -f etcd-operator-role.yaml
+
+oc get roles
+
+cat > etcd-operator-rolebinding.yaml<<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: etcd-operator-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: etcd-operator-role
+subjects:
+- kind: ServiceAccount
+  name: etcd-operator-sa
+  namespace: myproject
+EOF
+
+oc create -f etcd-operator-rolebinding.yaml
+
+oc get rolebindings
+
+Step 3:
+cat > etcd-operator-deployment.yaml<<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    name: etcdoperator
+  name: etcd-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: etcd-operator
+  template:
+    metadata:
+      labels:
+        name: etcd-operator
+    spec:
+      containers:
+      - command:
+        - etcd-operator
+        - --create-crd=false
+        env:
+        - name: MY_POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        image: quay.io/coreos/etcd-operator@sha256:c0301e4686c3ed4206e370b42de5a3bd2229b9fb4906cf85f3f30650424abec2
+        imagePullPolicy: IfNotPresent
+        name: etcd-operator
+      serviceAccountName: etcd-operator-sa
+EOF
+
+oc create -f etcd-operator-deployment.yaml
+
+oc get deploy
+
+oc get pods
+
+export ETCD_OPERATOR_POD=$(oc get pods -l name=etcd-operator -o jsonpath='{.items[0].metadata.name}')
+oc logs $ETCD_OPERATOR_POD -f
+
+oc get endpoints etcd-operator -o yaml
+
+Step: 4
+cat > etcd-operator-cr.yaml<<EOF
+apiVersion: etcd.database.coreos.com/v1beta2
+kind: EtcdCluster
+metadata:
+  name: example-etcd-cluster
+spec:
+  size: 3
+  version: 3.1.10
+EOF
+
+oc create -f etcd-operator-cr.yaml
+oc patch service example-etcd-cluster --type='json' -p '[{"op": "replace", "path": "/spec/publishNotReadyAddresses", "value":true}]'
+oc get etcdclusters
+oc get pods -l etcd_cluster=example-etcd-cluster -w
+oc get services -l etcd_cluster=example-etcd-cluster
+
+oc run etcdclient --image=busybox busybox --restart=Never -- /usr/bin/tail -f /dev/null
+oc rsh etcdclient
+wget https://github.com/coreos/etcd/releases/download/v3.1.4/etcd-v3.1.4-linux-amd64.tar.gz
+tar -xvf etcd-v3.1.4-linux-amd64.tar.gz
+cp etcd-v3.1.4-linux-amd64/etcdctl .
+export ETCDCTL_API=3
+export ETCDCTL_ENDPOINTS=example-etcd-cluster-client:2379
+./etcdctl put operator sdk
+./etcdctl get operator
+exit
+
+
+steps 5:
+oc patch etcdcluster example-etcd-cluster --type='json' -p '[{"op": "replace", "path": "/spec/size", "value":5}]'
+oc patch etcdcluster example-etcd-cluster --type='json' -p '[{"op": "replace", "path": "/spec/version", "value":3.2.13}]'
+export EXAMPLE_ETCD_CLUSTER_POD=$(oc get pods -l app=etcd -o jsonpath='{.items[0].metadata.name}')
+oc delete pod $EXAMPLE_ETCD_CLUSTER_POD
+
+clean up
+oc delete etcdcluster example-etcd-cluster
+oc delete deployment etcd-operator
+oc delete crd etcdclusters.etcd.database.coreos.com
